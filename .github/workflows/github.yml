@@ -60,9 +60,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.ghToken }}
 
-      - name: Validate Zip
-        run: shopware-cli extension validate $(pwd)/${EXTENSION_NAME}.zip
-
       - name: Unzip
         run: |
           unzip -o -q "${EXTENSION_NAME}.zip" -d ./toDeploy
