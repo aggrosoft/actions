@@ -1,0 +1,102 @@
+# This workflow is meant to be used to build compatible plugin  with composer without shopware store
+
+on:
+  workflow_call:
+    inputs:
+      extensionName:
+        description: 'Your extension name'
+        required: true
+        type: string
+      shopwareVersion:
+        description: 'The shopware version to build the extension with'
+        required: false
+        type: string
+        default: '6.4.0'
+      cliVersion:
+        description: 'The shopware-cli version to build the extension with'
+        required: false
+        type: string
+        default: '0.1.45'
+    secrets:
+      ghToken:
+        required: true
+
+env:
+  EXTENSION_NAME: ${{ inputs.extensionName }}
+  SHOPWARE_CLI_VERSION: ${{ inputs.cliVersion }}
+
+jobs:
+  Build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Download shopware-cli
+        run: |
+          wget -q https://github.com/FriendsOfShopware/shopware-cli/releases/download/${SHOPWARE_CLI_VERSION}/shopware-cli_Linux_x86_64.tar.gz
+          tar -zxf shopware-cli_*.tar.gz shopware-cli
+          sudo mv shopware-cli /usr/bin/shopware-cli
+          rm shopware-cli_*.tar.gz
+
+      - name: Build & create zip
+        run: |
+          shopware-cli extension zip --disable-git .
+
+      - name: Upload Artefact
+        uses: actions/upload-artifact@v3
+        with:
+          name: ${{ env.EXTENSION_NAME }}
+          path: ${{ env.EXTENSION_NAME }}.zip
+
+      - name: Get version
+        run: |
+          echo "EXTENSION_VERSION=$(jq ".version" composer.json -r)" >> $GITHUB_ENV
+
+      - uses: mukunku/tag-exists-action@v1.2.0
+        id: checkTag
+        with:
+          tag: ${{ env.EXTENSION_VERSION }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.ghToken }}
+
+      - name: Validate Zip
+        run: shopware-cli extension validate $(pwd)/${EXTENSION_NAME}.zip
+
+      - name: Unzip
+        run: |
+          unzip -o -q "${EXTENSION_NAME}.zip" -d ./toDeploy
+          mv "${EXTENSION_NAME}.zip" /tmp/
+          find ./ -maxdepth 1 ! -name "toDeploy" ! -name ".git" ! -name "." ! -name ".." -exec rm -rf {} \;
+          mv ./toDeploy/${EXTENSION_NAME}/* ./
+          rm -rf ./toDeploy
+          rm -rf ./vendor
+
+      - name: Generate changelog
+        if: steps.checkTag.outputs.exists != 'true'
+        id: tag_version
+        uses: mathieudutour/github-tag-action@v6.1
+        with:
+          tag_prefix: ""
+          github_token: ${{ secrets.ghToken }}
+          custom_tag: ${{ env.EXTENSION_VERSION }}
+          dry_run: true
+
+      - name: commit
+        if: steps.checkTag.outputs.exists != 'true'
+        run: |
+          git config user.name "GitHub Actions Bot"
+          git config user.email "<>"
+          git add -f *
+          git commit -m "chore: Build release"
+          git tag ${EXTENSION_VERSION}
+          git push origin ${EXTENSION_VERSION}
+
+      - name: Create a GitHub release
+        if: steps.checkTag.outputs.exists != 'true'
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: /tmp/${{ env.EXTENSION_NAME }}.zip
+          tag: ${{ env.EXTENSION_VERSION }}
+          name: ${{ env.EXTENSION_VERSION }}
+          body: ${{ steps.tag_version.outputs.changelog }}

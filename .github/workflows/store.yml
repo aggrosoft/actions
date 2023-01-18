@@ -1,0 +1,133 @@
+name: Store
+on:
+    workflow_call:
+        inputs:
+          extensionName:
+            required: true
+            type: string
+          shopwareVersion:
+              description: 'The shopware version to build the extension with'
+              required: false
+              type: string
+              default: '6.4.0'
+          cliVersion:
+              description: 'The shopware-cli version to build the extension with'
+              required: false
+              type: string
+              default: '0.1.26'
+        secrets:
+          accountUser:
+            required: true
+          accountPassword:
+            required: true
+          ghToken:
+            required: true
+
+env:
+    EXTENSION_NAME: ${{ inputs.extensionName }}
+    ACCOUNT_USER: ${{ secrets.accountUser }}
+    ACCOUNT_PASSWORD: ${{ secrets.accountPassword }}
+    SHOPWARE_CLI_VERSION: ${{ inputs.cliVersion }}
+
+jobs:
+    Build:
+        container: ghcr.io/friendsofshopware/platform-plugin-dev:v${{ inputs.shopwareVersion }}
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v3
+
+            - name: Download shopware-cli
+              run: |
+                git config --global --add safe.directory $(pwd)
+                wget -q https://github.com/FriendsOfShopware/shopware-cli/releases/download/${SHOPWARE_CLI_VERSION}/shopware-cli_${SHOPWARE_CLI_VERSION}_Linux_x86_64.tar.gz
+                tar -zxf shopware-cli_*.tar.gz shopware-cli
+                mv shopware-cli /usr/bin/shopware-cli
+                rm shopware-cli_*.tar.gz
+
+            - name: Build & create zip
+              run: |
+                  if test -f "./src/Resources/app/administration/package.json"; then
+                      npm install --prefix "./src/Resources/app/administration/" --unsafe-perm
+                  fi
+                  
+                  if test -f "./src/Resources/app/storefront/package.json"; then
+                      npm install --prefix "./src/Resources/app/storefront/" --unsafe-perm
+                  fi
+                  
+                  if test -f "./src/Resources/app/package.json"; then
+                      npm install --prefix "./src/Resources/app/" --unsafe-perm
+                  fi
+                  
+                  rm -rf ./.github
+                  
+                  /usr/bin/shopware-cli extension zip . --disable-git
+
+            - name: Upload Artefact
+              uses: actions/upload-artifact@v3
+              with:
+                  name: ${{ env.EXTENSION_NAME }}
+                  path: ${{ env.EXTENSION_NAME }}.zip
+
+            - name: Get version
+              run: |
+                  echo "EXTENSION_VERSION=$(jq ".version" composer.json -r)" >> $GITHUB_ENV
+
+            - uses: mukunku/tag-exists-action@v1.2.0
+              id: checkTag
+              with:
+                  tag: ${{ env.EXTENSION_VERSION }}
+              env:
+                  GITHUB_TOKEN: ${{ secrets.ghToken }}
+
+            - name: Validate Zip
+              if: steps.checkTag.outputs.exists != 'true'
+              run: plugin-uploader ext:validate $(pwd)/${EXTENSION_NAME}.zip
+
+            - name: StoreUpdate
+              if: steps.checkTag.outputs.exists != 'true' || contains(github.event.head_commit.message, '[store update]')
+              run: plugin-uploader ext:update $(pwd)/
+
+            - name: StoreUpload
+              if: steps.checkTag.outputs.exists != 'true'
+              run: plugin-uploader ext:upload $(pwd)/${EXTENSION_NAME}.zip
+              env:
+                GITHUB_TOKEN: ${{ secrets.ghToken }}
+
+            - name: Unzip
+              run: |
+                  unzip -o -q "${EXTENSION_NAME}.zip" -d ./toDeploy
+                  mv "${EXTENSION_NAME}.zip" /tmp/
+                  find ./ -maxdepth 1 ! -name "toDeploy" ! -name ".git" ! -name "." ! -name ".." -exec rm -rf {} \;
+                  mv ./toDeploy/${EXTENSION_NAME}/* ./
+                  rm -rf ./toDeploy
+                  rm -rf ./vendor
+
+            - name: Generate changelog
+              if: steps.checkTag.outputs.exists != 'true'
+              id: tag_version
+              uses: mathieudutour/github-tag-action@v6.1
+              with:
+                  tag_prefix: ""
+                  github_token: ${{ secrets.ghToken }}
+                  custom_tag: ${{ env.EXTENSION_VERSION }}
+                  dry_run: true
+
+            - name: commit
+              if: steps.checkTag.outputs.exists != 'true'
+              run: |
+                  git config user.name "GitHub Actions Bot"
+                  git config user.email "<>"
+                  git add -f *
+                  git commit -m "chore: Build release"
+                  git tag ${EXTENSION_VERSION}
+                  git push origin ${EXTENSION_VERSION}
+
+            - name: Create a GitHub release
+              if: steps.checkTag.outputs.exists != 'true'
+              uses: ncipollo/release-action@v1
+              with:
+                  artifacts: /tmp/${{ env.EXTENSION_NAME }}.zip
+                  tag: ${{ env.EXTENSION_VERSION }}
+                  name: ${{ env.EXTENSION_VERSION }}
+                  body: ${{ steps.tag_version.outputs.changelog }}
